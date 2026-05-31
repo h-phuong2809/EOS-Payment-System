@@ -19,6 +19,7 @@ foreach ($service in $services) {
   )
   Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WindowStyle Hidden
   Write-Host "Started $($service.Name) with profile $($service.Profile). Log: $logPath"
+  Start-Sleep -Seconds 5
 }
 
 Write-Host "Gateway: http://localhost:8080"
