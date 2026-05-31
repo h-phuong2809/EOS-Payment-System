@@ -1,0 +1,13 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/gateway;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE
+
+app:
+  role: gateway
+  gateway:
+    node-a-url: http://localhost:8081/api
+    node-b-url: http://localhost:8082/api
+    node-c-url: http://localhost:8083/api

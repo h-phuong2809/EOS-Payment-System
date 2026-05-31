@@ -1,0 +1,32 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/eos_payment;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+
+app:
+  role: node
+  dedup-window-ms: 86400000
+  max-event-age-ms: 2592000000
+  allowed-lateness-ms: 2000
+  max-in-flight-events: 24
+  global-dedup:
+    datasource:
+      url: jdbc:h2:file:./data/global_dedup;DB_CLOSE_DELAY=-1;AUTO_SERVER=TRUE
+      username: sa
+      password:
