@@ -19,6 +19,8 @@ export default function BenchmarkPanel({ payload, onRun, onReplayWal }) {
   const eos = runs.find((r) => r.mode === 'EOS')
   const alo = runs.find((r) => r.mode === 'ALO')
   const labels = [...new Set(windows.map((w) => String(w.windowStartMs)))].sort((a, b) => Number(a) - Number(b))
+  const eosDuplicateCharges = duplicateCharges(eos)
+  const aloDuplicateCharges = duplicateCharges(alo)
 
   async function runBenchmark(event) {
     event.preventDefault()
@@ -47,6 +49,7 @@ export default function BenchmarkPanel({ payload, onRun, onReplayWal }) {
       <div className="compare-grid">
         <Metric label="EOS TPS" value={eos?.tps || 0} />
         <Metric label="ALO TPS" value={alo?.tps || 0} tone="warning" />
+        <Metric label="Duplicate Charges" value={`${eosDuplicateCharges} / ${aloDuplicateCharges}`} tone="danger" />
         <Metric label="Duplicates Blocked" value={eos?.duplicatesBlocked || 0} tone="success" />
         <Metric label="WAL / Success" value={`${Number(eos?.walOverheadPct || 0).toFixed(0)}%`} tone="purple" />
         <Metric label="Late Events" value={eos?.lateEvents || 0} tone="danger" />
@@ -100,6 +103,7 @@ function Metric({ label, value, tone }) {
 
 function LatencyTable({ eos, alo }) {
   const rows = [
+    ['avg latency', 'avgLatencyMs'],
     ['p50 latency', 'p50LatencyMs'],
     ['p95 latency', 'p95LatencyMs'],
     ['p99 latency', 'p99LatencyMs'],
@@ -159,4 +163,9 @@ function fmtWindow(ms) {
 function formatLatency(run, field) {
   if (!run) return '-'
   return `${Number(run[field] || 0).toFixed(2)} ms`
+}
+
+function duplicateCharges(run) {
+  if (!run) return 0
+  return Math.max(0, Number(run.processedSuccess || 0) - Number(run.uniquePayments || 0))
 }

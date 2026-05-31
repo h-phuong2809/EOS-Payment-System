@@ -342,6 +342,7 @@ public class PaymentStreamService implements PaymentOperations {
         int outOfOrder = 0;
         int lateEvents = 0;
         int backpressureDelayed = 0;
+        int walEntriesObserved = 0;
 
         for (int i = 0; i < events.size(); i++) {
             StreamEvent event = events.get(i);
@@ -397,6 +398,7 @@ public class PaymentStreamService implements PaymentOperations {
                 successLatencies.add(latency);
                 acc.processedSuccess++;
                 if (result.containsKey("walSeq")) {
+                    walEntriesObserved++;
                     acc.walEntries++;
                 }
             } else if ("DUPLICATE_REJECTED".equals(status)) {
@@ -411,8 +413,8 @@ public class PaymentStreamService implements PaymentOperations {
 
         double durationMs = Math.max(elapsedMs(start), 1.0);
         int uniquePayments = events.stream().map(e -> e.idempotencyKey).collect(Collectors.toSet()).size();
-        long walEntries = wal.count();
-        long walCommitted = wal.countByStatus("COMMITTED");
+        long walEntries = distributed ? walEntriesObserved : wal.count();
+        long walCommitted = distributed ? walEntriesObserved : wal.countByStatus("COMMITTED");
         BenchmarkRun run = new BenchmarkRun();
         run.runId = runId;
         run.mode = mode;
