@@ -18,6 +18,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.web.client.RestTemplate;
 
 @Service
 @ConditionalOnProperty(name = "app.role", havingValue = "node", matchIfMissing = true)
@@ -36,6 +37,7 @@ public class PaymentStreamService implements PaymentOperations {
     private final AtomicLong walSequence = new AtomicLong();
     private final Object paymentLock = new Object();
     private volatile long walDelayMillis;
+    private final RestTemplate http = new RestTemplate();
 
     @Value("${app.dedup-window-ms}")
     private long dedupWindowMs;
@@ -291,16 +293,26 @@ public class PaymentStreamService implements PaymentOperations {
         double duplicateRate = Math.max(0, Math.min(command.duplicateRate() == null ? 0.3 : command.duplicateRate(), 0.8));
         int windowSizeSec = Math.max(2, Math.min(command.windowSizeSec() == null ? 10 : command.windowSizeSec(), 60));
         int seed = command.seed() == null ? 117 : command.seed();
-        List<StreamEvent> events = makePaymentStream(eventCount, duplicateRate, seed, 250);
+        boolean distributed = Boolean.TRUE.equals(command.distributed());
+        List<StreamEvent> events = makePaymentStream(eventCount, duplicateRate, seed, 250, distributed);
 
         windows.deleteAll();
         runs.deleteAll();
         checkpoints.deleteAll();
 
-        resetOperationalTablesOnly();
-        runStreamBenchmark("ALO", events, windowSizeSec);
-        resetOperationalTablesOnly();
-        runStreamBenchmark("EOS", events, windowSizeSec);
+        if (distributed) {
+            resetAllNodesOperationalState();
+        } else {
+            resetOperationalTablesOnly();
+        }
+        runStreamBenchmark("ALO", events, windowSizeSec, distributed);
+
+        if (distributed) {
+            resetAllNodesOperationalState();
+        } else {
+            resetOperationalTablesOnly();
+        }
+        runStreamBenchmark("EOS", events, windowSizeSec, distributed);
 
         Map<String, Object> payload = latestBenchmarkPayload();
         payload.put("dataset", mutableMap(
@@ -313,7 +325,7 @@ public class PaymentStreamService implements PaymentOperations {
         return payload;
     }
 
-    private void runStreamBenchmark(String mode, List<StreamEvent> events, int windowSizeSec) {
+    private void runStreamBenchmark(String mode, List<StreamEvent> events, int windowSizeSec, boolean distributed) {
         String runId = UUID.randomUUID().toString();
         long start = System.nanoTime();
         List<Double> latencies = new ArrayList<>();
@@ -361,7 +373,18 @@ public class PaymentStreamService implements PaymentOperations {
 
             PaymentCommand payment = new PaymentCommand(event.senderAccount, event.receiverAccount, event.amount.doubleValue(),
                     event.nodeId, mode, event.idempotencyKey, event.retryCount, event.eventTimeMs);
-            Map<String, Object> result = submitPayment(payment);
+            
+            Map<String, Object> result;
+            if (distributed) {
+                if (currentNodeConfigured() && configuredNodeId.equals(event.nodeId)) {
+                    result = submitPayment(payment);
+                } else {
+                    result = postToNode(event.nodeId, "/payment", payment);
+                }
+            } else {
+                result = submitPayment(payment);
+            }
+            
             double latency = ((Number) result.getOrDefault("elapsedMs", 0)).doubleValue();
             latencies.add(latency);
             acc.latencies.add(latency);
@@ -577,7 +600,7 @@ public class PaymentStreamService implements PaymentOperations {
         return wal.save(entry);
     }
 
-    private List<StreamEvent> makePaymentStream(int eventCount, double duplicateRate, int seed, int intervalMs) {
+    private List<StreamEvent> makePaymentStream(int eventCount, double duplicateRate, int seed, int intervalMs, boolean distributed) {
         Random rng = new Random(seed);
         List<StreamEvent> originals = new ArrayList<>();
         List<StreamEvent> events = new ArrayList<>();
@@ -604,9 +627,9 @@ public class PaymentStreamService implements PaymentOperations {
             }
             event.eventTimeMs = baseMs + (long) i * intervalMs + rng.nextInt(3001) - 1500;
             event.processingTimeMs = baseMs + (long) i * intervalMs;
-            event.nodeId = currentNodeConfigured()
-                    ? configuredNodeId
-                    : List.of("NODE_A", "NODE_B", "NODE_C").get(rng.nextInt(3));
+            event.nodeId = distributed
+                    ? List.of("NODE_A", "NODE_B", "NODE_C").get(rng.nextInt(3))
+                    : (currentNodeConfigured() ? configuredNodeId : List.of("NODE_A", "NODE_B", "NODE_C").get(rng.nextInt(3)));
             events.add(event);
         }
         return events;
@@ -651,6 +674,43 @@ public class PaymentStreamService implements PaymentOperations {
             return configuredNodeId;
         }
         return defaultText(requestedNodeId, "NODE_A");
+    }
+
+    private String getNodeUrl(String nodeId) {
+        if ("NODE_A".equals(nodeId)) return "http://localhost:8081/api";
+        if ("NODE_B".equals(nodeId)) return "http://localhost:8082/api";
+        if ("NODE_C".equals(nodeId)) return "http://localhost:8083/api";
+        throw new IllegalArgumentException("Unknown node: " + nodeId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> postToNode(String nodeId, String path, Object body) {
+        try {
+            return http.postForObject(getNodeUrl(nodeId) + path, body, Map.class);
+        } catch (Exception e) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("status", "ERROR");
+            err.put("message", nodeId + " is offline/unreachable.");
+            err.put("httpStatus", 503);
+            err.put("eosApplied", false);
+            return err;
+        }
+    }
+
+    private void resetAllNodesOperationalState() {
+        globalDedup.deleteAll();
+        List<String> nodeIds = List.of("NODE_A", "NODE_B", "NODE_C");
+        for (String nodeId : nodeIds) {
+            if (currentNodeConfigured() && configuredNodeId.equals(nodeId)) {
+                resetOperationalTablesOnly();
+            } else {
+                try {
+                    http.postForObject(getNodeUrl(nodeId) + "/reset", null, Map.class);
+                } catch (Exception e) {
+                    // Ignore offline node
+                }
+            }
+        }
     }
 
     private boolean currentNodeConfigured() {

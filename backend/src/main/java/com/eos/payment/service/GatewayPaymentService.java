@@ -69,8 +69,15 @@ public class GatewayPaymentService implements PaymentOperations {
 
     @Override
     public Map<String, Object> runBenchmark(BenchmarkCommand command) {
-        Map<String, Object> result = post("NODE_A", "/benchmark/compare", command);
-        result.put("gatewayNote", "Benchmark executed on NODE_A; payment/retry demo routes across all nodes.");
+        BenchmarkCommand distributedCommand = new BenchmarkCommand(
+                command.eventCount(),
+                command.duplicateRate(),
+                command.windowSizeSec(),
+                command.seed(),
+                true
+        );
+        Map<String, Object> result = post("NODE_A", "/benchmark/compare", distributedCommand);
+        result.put("gatewayNote", "Benchmark executed across all nodes; statistics recorded on NODE_A.");
         return result;
     }
 
@@ -109,9 +116,13 @@ public class GatewayPaymentService implements PaymentOperations {
     public List<ProcessingNode> nodes() {
         List<ProcessingNode> result = new ArrayList<>();
         for (String nodeId : nodeUrls.keySet()) {
-            ProcessingNode[] rows = http.getForObject(nodeUrls.get(nodeId) + "/nodes", ProcessingNode[].class);
-            if (rows != null) {
-                result.addAll(Arrays.asList(rows));
+            try {
+                ProcessingNode[] rows = http.getForObject(nodeUrls.get(nodeId) + "/nodes", ProcessingNode[].class);
+                if (rows != null) {
+                    result.addAll(Arrays.asList(rows));
+                }
+            } catch (Exception e) {
+                result.add(new ProcessingNode(nodeId, nodeId + " Service (Offline)", "FAILED"));
             }
         }
         return result;
@@ -119,7 +130,11 @@ public class GatewayPaymentService implements PaymentOperations {
 
     @Override
     public ProcessingNode toggleNode(String nodeId) {
-        return http.postForObject(nodeUrls.get(nodeId) + "/nodes/" + nodeId + "/toggle", null, ProcessingNode.class);
+        try {
+            return http.postForObject(nodeUrls.get(nodeId) + "/nodes/" + nodeId + "/toggle", null, ProcessingNode.class);
+        } catch (Exception e) {
+            return new ProcessingNode(nodeId, nodeId + " Service", "FAILED");
+        }
     }
 
     @Override
@@ -171,22 +186,47 @@ public class GatewayPaymentService implements PaymentOperations {
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> post(String nodeId, String path, Object body) {
-        return http.postForObject(nodeUrls.get(nodeId) + path, body, Map.class);
+        try {
+            return http.postForObject(nodeUrls.get(nodeId) + path, body, Map.class);
+        } catch (org.springframework.web.client.RestClientException e) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("status", "ERROR");
+            err.put("message", nodeId + " is offline/unreachable.");
+            err.put("httpStatus", 503);
+            err.put("eosApplied", false);
+            return err;
+        }
     }
 
     @SuppressWarnings("unchecked")
     private Map<String, Object> getMap(String nodeId, String path) {
-        return http.getForObject(nodeUrls.get(nodeId) + path, Map.class);
+        try {
+            return http.getForObject(nodeUrls.get(nodeId) + path, Map.class);
+        } catch (org.springframework.web.client.RestClientException e) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("status", "FAILED");
+            err.put("totalRequests", 0);
+            err.put("processed", 0);
+            err.put("duplicatesBlocked", 0);
+            err.put("transactions", 0);
+            err.put("walEntries", 0);
+            err.put("walCommitted", 0);
+            return err;
+        }
     }
 
     @SuppressWarnings("unchecked")
     private List<Object> aggregateLists(String path, String key) {
         List<Object> result = new ArrayList<>();
         for (String nodeId : nodeUrls.keySet()) {
-            Map<String, Object> payload = getMap(nodeId, path);
-            Object value = payload.get(key);
-            if (value instanceof List<?> rows) {
-                result.addAll((List<Object>) rows);
+            try {
+                Map<String, Object> payload = getMap(nodeId, path);
+                Object value = payload.get(key);
+                if (value instanceof List<?> rows) {
+                    result.addAll((List<Object>) rows);
+                }
+            } catch (Exception e) {
+                // ignore
             }
         }
         return result;
@@ -195,9 +235,13 @@ public class GatewayPaymentService implements PaymentOperations {
     private <T> List<T> aggregateArrays(String path, Class<T[]> type) {
         List<T> result = new ArrayList<>();
         for (String url : nodeUrls.values()) {
-            T[] rows = http.getForObject(url + path, type);
-            if (rows != null) {
-                result.addAll(Arrays.asList(rows));
+            try {
+                T[] rows = http.getForObject(url + path, type);
+                if (rows != null) {
+                    result.addAll(Arrays.asList(rows));
+                }
+            } catch (Exception e) {
+                // ignore
             }
         }
         return result;
