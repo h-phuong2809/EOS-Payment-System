@@ -80,23 +80,37 @@ export default function App() {
         <div className="main-grid">
           <aside>
             <NodePanel nodes={nodes} onToggle={async (id) => {
-              await api.toggleNode(id)
-              showToast(`${id} toggled`, 'warning')
+              try {
+                await api.toggleNode(id)
+                showToast(`${id} toggled`, 'warning')
+              } catch (error) {
+                showToast(error.message, 'error')
+              }
               await refreshAll()
             }} />
             <PaymentConsole
               accounts={accounts}
               onSubmit={async (payload) => {
-                const result = await api.payment(payload)
-                showToast(result.status === 'SUCCESS' ? 'Payment processed' : result.status, result.status === 'SUCCESS' ? 'success' : 'warning')
-                await refreshAll()
-                return result
+                try {
+                  const result = await api.payment(payload)
+                  showToast(result.status === 'SUCCESS' ? 'Payment processed' : result.status, result.status === 'SUCCESS' ? 'success' : 'warning')
+                  await refreshAll()
+                  return result
+                } catch (error) {
+                  showToast(error.message, 'error')
+                  return { status: 'ERROR', message: error.message }
+                }
               }}
               onRetry={async (payload) => {
-                const result = await api.simulateRetries(payload)
-                showToast('Retry simulation complete', 'success')
-                await refreshAll()
-                return result
+                try {
+                  const result = await api.simulateRetries(payload)
+                  showToast('Retry simulation complete', 'success')
+                  await refreshAll()
+                  return result
+                } catch (error) {
+                  showToast(error.message, 'error')
+                  return { status: 'ERROR', message: error.message }
+                }
               }}
               onReset={handleReset}
             />

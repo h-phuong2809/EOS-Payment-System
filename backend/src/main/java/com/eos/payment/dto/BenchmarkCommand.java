@@ -9,5 +9,10 @@ public record BenchmarkCommand(
         Double duplicateRate,
         @JsonAlias("window_size_sec")
         Integer windowSizeSec,
-        Integer seed
-) {}
+        Integer seed,
+        Boolean distributed
+) {
+    public BenchmarkCommand(Integer eventCount, Double duplicateRate, Integer windowSizeSec, Integer seed) {
+        this(eventCount, duplicateRate, windowSizeSec, seed, false);
+    }
+}
