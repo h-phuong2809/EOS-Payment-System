@@ -11,19 +11,30 @@ import java.util.concurrent.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.MediaType;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:eos_payment_test;DB_CLOSE_DELAY=-1",
         "spring.jpa.hibernate.ddl-auto=create-drop"
 })
+@AutoConfigureMockMvc
 class PaymentStreamServiceTests {
     @Autowired
     PaymentStreamService service;
     @Autowired
     PaymentTransactionRepository transactions;
+    @Autowired
+    MockMvc mockMvc;
 
     @BeforeEach
     void reset() {
@@ -112,6 +123,39 @@ class PaymentStreamServiceTests {
         Map<String, Object> stats = service.stats();
         assertThat(((Number) stats.get("processed")).intValue()).isEqualTo(readNumber(eosRun, "processedSuccess"));
         assertThat(((Number) stats.get("transactions")).intValue()).isEqualTo(readNumber(eosRun, "processedSuccess"));
+    }
+
+    @Test
+    void benchmarkStreamEmitsLiveSseEvents() throws Exception {
+        MvcResult stream = mockMvc.perform(get("/api/benchmark/stream")
+                        .param("eventCount", "10")
+                        .param("duplicateRate", "0.3")
+                        .param("windowSizeSec", "2")
+                        .param("seed", "117")
+                        .param("streamDelayMs", "0"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+
+        String body = waitForStreamEvent(stream, "event:complete");
+
+        assertThat(body).contains("event:started");
+        assertThat(body).contains("event:progress");
+        assertThat(body).contains("event:complete");
+    }
+
+    private static String waitForStreamEvent(MvcResult stream, String marker) throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        String body = "";
+        while (System.currentTimeMillis() < deadline) {
+            body = stream.getResponse().getContentAsString();
+            if (body.contains(marker)) {
+                return body;
+            }
+            Thread.sleep(50);
+        }
+        return body;
     }
 
     private static Object read(Object bean, String field) {

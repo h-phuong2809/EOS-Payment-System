@@ -6,11 +6,13 @@ import com.eos.payment.dto.RetrySimulationCommand;
 import com.eos.payment.model.*;
 import java.util.List;
 import java.util.Map;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 public interface PaymentOperations {
     Map<String, Object> submitPayment(PaymentCommand command);
     Map<String, Object> simulateRetries(RetrySimulationCommand command);
     Map<String, Object> runBenchmark(BenchmarkCommand command);
+    SseEmitter streamBenchmark(BenchmarkCommand command);
     Map<String, Object> latestBenchmarkPayload();
     Map<String, Object> stats();
     List<Account> accounts();

@@ -4,16 +4,28 @@ import com.eos.payment.dto.BenchmarkCommand;
 import com.eos.payment.dto.PaymentCommand;
 import com.eos.payment.dto.RetrySimulationCommand;
 import com.eos.payment.model.*;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.springframework.web.util.UriComponentsBuilder;
 
 @Service
 @ConditionalOnProperty(name = "app.role", havingValue = "gateway")
 public class GatewayPaymentService implements PaymentOperations {
+    private static final int DEFAULT_EVENT_COUNT = 160;
+    private static final double DEFAULT_DUPLICATE_RATE = 0.3;
+    private static final int DEFAULT_WINDOW_SIZE_SEC = 10;
+    private static final int DEFAULT_SEED = 117;
+    private static final int DEFAULT_STREAM_DELAY_MS = 25;
+
     private final RestTemplate http = new RestTemplate();
     private final GlobalDeduplicationStore globalDedup;
     private final Map<String, String> nodeUrls;
@@ -69,16 +81,18 @@ public class GatewayPaymentService implements PaymentOperations {
 
     @Override
     public Map<String, Object> runBenchmark(BenchmarkCommand command) {
-        BenchmarkCommand distributedCommand = new BenchmarkCommand(
-                command.eventCount(),
-                command.duplicateRate(),
-                command.windowSizeSec(),
-                command.seed(),
-                true
-        );
-        Map<String, Object> result = post("NODE_A", "/benchmark/compare", distributedCommand);
+        Map<String, Object> result = post("NODE_A", "/benchmark/compare", distributedBenchmarkCommand(command));
         result.put("gatewayNote", "Benchmark executed across all nodes; statistics recorded on NODE_A.");
         return result;
+    }
+
+    @Override
+    public SseEmitter streamBenchmark(BenchmarkCommand command) {
+        SseEmitter emitter = new SseEmitter(0L);
+        Thread worker = new Thread(() -> proxyBenchmarkStream(command, emitter), "gateway-benchmark-sse-" + UUID.randomUUID());
+        worker.setDaemon(true);
+        worker.start();
+        return emitter;
     }
 
     @Override
@@ -108,8 +122,12 @@ public class GatewayPaymentService implements PaymentOperations {
 
     @Override
     public List<Account> accounts() {
-        Account[] rows = http.getForObject(nodeUrls.get("NODE_A") + "/accounts", Account[].class);
-        return rows == null ? List.of() : Arrays.asList(rows);
+        try {
+            Account[] rows = http.getForObject(nodeUrls.get("NODE_A") + "/accounts", Account[].class);
+            return rows == null ? List.of() : Arrays.asList(rows);
+        } catch (org.springframework.web.client.RestClientException e) {
+            return List.of();
+        }
     }
 
     @Override
@@ -213,6 +231,82 @@ public class GatewayPaymentService implements PaymentOperations {
             err.put("walCommitted", 0);
             return err;
         }
+    }
+
+    private void proxyBenchmarkStream(BenchmarkCommand command, SseEmitter emitter) {
+        String url = benchmarkStreamUrl(command);
+        try {
+            http.execute(url, HttpMethod.GET, null, response -> {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(response.getBody(), StandardCharsets.UTF_8))) {
+                    String eventName = "message";
+                    StringBuilder data = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (line.isBlank()) {
+                            if (data.length() > 0) {
+                                sendSse(emitter, eventName, data.toString());
+                                data.setLength(0);
+                            }
+                            eventName = "message";
+                        } else if (line.startsWith("event:")) {
+                            eventName = line.substring("event:".length()).trim();
+                        } else if (line.startsWith("data:")) {
+                            if (data.length() > 0) {
+                                data.append('\n');
+                            }
+                            data.append(line.substring("data:".length()).trim());
+                        }
+                    }
+                    if (data.length() > 0) {
+                        sendSse(emitter, eventName, data.toString());
+                    }
+                }
+                return null;
+            });
+            emitter.complete();
+        } catch (Exception e) {
+            try {
+                sendSse(emitter, "error", "{\"message\":\"NODE_A is offline/unreachable.\"}");
+            } catch (Exception ignored) {
+                // Client may already be disconnected.
+            }
+            emitter.complete();
+        }
+    }
+
+    private BenchmarkCommand distributedBenchmarkCommand(BenchmarkCommand command) {
+        return new BenchmarkCommand(
+                command.eventCount(),
+                command.duplicateRate(),
+                command.windowSizeSec(),
+                command.seed(),
+                true,
+                command.streamDelayMs());
+    }
+
+    private String benchmarkStreamUrl(BenchmarkCommand command) {
+        BenchmarkCommand distributed = distributedBenchmarkCommand(command);
+        return UriComponentsBuilder
+                .fromHttpUrl(nodeUrls.get("NODE_A") + "/benchmark/stream")
+                .queryParam("eventCount", valueOrDefault(distributed.eventCount(), DEFAULT_EVENT_COUNT))
+                .queryParam("duplicateRate", valueOrDefault(distributed.duplicateRate(), DEFAULT_DUPLICATE_RATE))
+                .queryParam("windowSizeSec", valueOrDefault(distributed.windowSizeSec(), DEFAULT_WINDOW_SIZE_SEC))
+                .queryParam("seed", valueOrDefault(distributed.seed(), DEFAULT_SEED))
+                .queryParam("distributed", true)
+                .queryParam("streamDelayMs", valueOrDefault(distributed.streamDelayMs(), DEFAULT_STREAM_DELAY_MS))
+                .toUriString();
+    }
+
+    private static void sendSse(SseEmitter emitter, String eventName, Object data) {
+        try {
+            emitter.send(SseEmitter.event().name(eventName).data(data));
+        } catch (Exception e) {
+            throw new IllegalStateException("Benchmark stream client disconnected", e);
+        }
+    }
+
+    private static <T> T valueOrDefault(T value, T fallback) {
+        return value == null ? fallback : value;
     }
 
     @SuppressWarnings("unchecked")

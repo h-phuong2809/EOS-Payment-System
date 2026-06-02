@@ -137,6 +137,7 @@ Vì không kiểm tra `idempotencyKey`, cùng một request retry nhiều lần 
 ## Benchmark stream
 
 Endpoint `/api/benchmark/compare` tạo một luồng payment giả lập và chạy cả 2 mode `ALO` và `EOS`.
+Dashboard dùng thêm endpoint SSE `/api/benchmark/stream` để nhận `started`, `progress`, `run` và `complete` trong lúc benchmark đang xử lý, nên chart TPS/latency và bảng tumbling window cập nhật theo thời gian thực thay vì chờ kết quả cuối.
 
 Các tham số benchmark:
 
@@ -147,6 +148,7 @@ Các tham số benchmark:
 | `windowSizeSec` | Kích thước tumbling window | 2 đến 60 giây |
 | `seed` | Seed để tái lập dữ liệu | Mặc định 117 |
 | `distributed` | Chạy qua nhiều node | Gateway tự set `true` |
+| `streamDelayMs` | Độ trễ mô phỏng giữa các event SSE | 0 đến 100 ms |
 
 Metric được ghi nhận:
 
@@ -350,8 +352,8 @@ Dashboard React gồm các phần chính:
 | Node Panel | Xem trạng thái node và toggle `ACTIVE` / `FAILED`. |
 | Payment Console | Gửi thanh toán thủ công theo account, amount, node, mode và idempotency key. |
 | Retry Simulation | Gửi nhiều retry cùng một idempotency key để so sánh EOS và ALO. |
-| Live Stream Benchmark | Chạy benchmark EOS vs ALO theo event count, duplicate rate và window size. |
-| Charts | TPS và average latency theo tumbling window. |
+| Live Stream Benchmark | Chạy benchmark EOS vs ALO theo event count, duplicate rate và window size, nhận tiến độ realtime bằng SSE. |
+| Charts | TPS và average latency theo tumbling window, cập nhật khi từng event/window mới được xử lý. |
 | De-dup Table | Xem các idempotency key đã claim / success. |
 | WAL Log | Xem WAL sequence, operation, node, trạng thái commit. |
 | Transactions | Xem các transaction đã commit. |
@@ -372,6 +374,7 @@ Base path:
 | `POST` | `/payment` | Gửi một payment. |
 | `POST` | `/simulate-retries` | Mô phỏng retry cùng idempotency key. |
 | `POST` | `/benchmark/compare` | Chạy benchmark ALO và EOS. |
+| `GET` | `/benchmark/stream` | Stream benchmark realtime bằng Server-Sent Events. |
 | `GET` | `/benchmark/latest` | Lấy benchmark run, window, checkpoint mới nhất. |
 | `GET` | `/deduplication-table` | Xem bảng de-dup toàn cục. |
 | `GET` | `/wal-log` | Xem 50 WAL entry mới nhất. |
@@ -435,6 +438,12 @@ Invoke-RestMethod `
   }'
 ```
 
+Stream benchmark realtime bằng SSE:
+
+```powershell
+curl.exe "http://localhost:8080/api/benchmark/stream?eventCount=160&duplicateRate=0.3&windowSizeSec=10&seed=117&streamDelayMs=25"
+```
+
 ## Tài khoản demo
 
 Khi database trống hoặc reset, backend seed các tài khoản:
@@ -463,7 +472,7 @@ Khi database trống hoặc reset, backend seed các tài khoản:
 9. Quan sát:
    - EOS có `Duplicates Blocked` > 0.
    - ALO có duplicate charge.
-   - TPS và latency hiển thị theo tumbling window.
+   - TPS và latency hiển thị theo tumbling window và cập nhật realtime trong lúc benchmark đang chạy.
    - Late event, backpressure, WAL metrics xuất hiện.
 10. Toggle một node sang `FAILED`, rồi gửi payment vào node đó để thấy request bị reject.
 11. Bấm `Replay WAL` để mô phỏng recovery các WAL entry còn pending.

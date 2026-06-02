@@ -7,8 +7,10 @@ import com.eos.payment.service.PaymentOperations;
 import jakarta.validation.Valid;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api")
@@ -51,6 +53,17 @@ public class PaymentController {
     @PostMapping("/benchmark/compare")
     public Object benchmarkCompare(@RequestBody BenchmarkCommand command) {
         return service.runBenchmark(command);
+    }
+
+    @GetMapping(value = "/benchmark/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter benchmarkStream(
+            @RequestParam(required = false) Integer eventCount,
+            @RequestParam(required = false) Double duplicateRate,
+            @RequestParam(required = false) Integer windowSizeSec,
+            @RequestParam(required = false) Integer seed,
+            @RequestParam(required = false) Boolean distributed,
+            @RequestParam(required = false) Integer streamDelayMs) {
+        return service.streamBenchmark(new BenchmarkCommand(eventCount, duplicateRate, windowSizeSec, seed, distributed, streamDelayMs));
     }
 
     @GetMapping("/benchmark/latest")

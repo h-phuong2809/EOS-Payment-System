@@ -19,10 +19,18 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @Service
 @ConditionalOnProperty(name = "app.role", havingValue = "node", matchIfMissing = true)
 public class PaymentStreamService implements PaymentOperations {
+    private static final int DEFAULT_EVENT_COUNT = 160;
+    private static final double DEFAULT_DUPLICATE_RATE = 0.3;
+    private static final int DEFAULT_WINDOW_SIZE_SEC = 10;
+    private static final int DEFAULT_SEED = 117;
+    private static final int DEFAULT_STREAM_DELAY_MS = 25;
+    private static final int STREAM_INTERVAL_MS = 250;
+
     private final AccountRepository accounts;
     private final PaymentRequestRepository requests;
     private final DeduplicationRepository dedup;
@@ -289,43 +297,69 @@ public class PaymentStreamService implements PaymentOperations {
     }
 
     public Map<String, Object> runBenchmark(BenchmarkCommand command) {
-        int eventCount = Math.max(10, Math.min(command.eventCount() == null ? 160 : command.eventCount(), 1000));
-        double duplicateRate = Math.max(0, Math.min(command.duplicateRate() == null ? 0.3 : command.duplicateRate(), 0.8));
-        int windowSizeSec = Math.max(2, Math.min(command.windowSizeSec() == null ? 10 : command.windowSizeSec(), 60));
-        int seed = command.seed() == null ? 117 : command.seed();
-        boolean distributed = Boolean.TRUE.equals(command.distributed());
-        List<StreamEvent> events = makePaymentStream(eventCount, duplicateRate, seed, 250, distributed);
+        return runBenchmarkInternal(command, null);
+    }
+
+    public SseEmitter streamBenchmark(BenchmarkCommand command) {
+        SseEmitter emitter = new SseEmitter(0L);
+        Thread worker = new Thread(() -> {
+            try {
+                runBenchmarkInternal(command, (eventName, payload) -> sendToEmitter(emitter, eventName, payload));
+                emitter.complete();
+            } catch (Exception e) {
+                try {
+                    sendToEmitter(emitter, "error", mutableMap("message", e.getMessage() == null ? "Benchmark stream failed" : e.getMessage()));
+                } catch (Exception ignored) {
+                    // Client may already be disconnected.
+                }
+                emitter.complete();
+            }
+        }, "benchmark-sse-" + UUID.randomUUID());
+        worker.setDaemon(true);
+        worker.start();
+        return emitter;
+    }
+
+    private Map<String, Object> runBenchmarkInternal(BenchmarkCommand command, BenchmarkSink sink) {
+        BenchmarkSettings settings = BenchmarkSettings.from(command);
+        List<StreamEvent> events = makePaymentStream(
+                settings.eventCount(),
+                settings.duplicateRate(),
+                settings.seed(),
+                STREAM_INTERVAL_MS,
+                settings.distributed());
+        Map<String, Object> dataset = benchmarkDataset(events, settings);
+        sendIfPresent(sink, "started", mutableMap(
+                "dataset", dataset,
+                "runs", List.of(),
+                "windows", List.of(),
+                "checkpoints", List.of()));
 
         windows.deleteAll();
         runs.deleteAll();
         checkpoints.deleteAll();
 
-        if (distributed) {
+        if (settings.distributed()) {
             resetAllNodesOperationalState();
         } else {
             resetOperationalTablesOnly();
         }
-        runStreamBenchmark("ALO", events, windowSizeSec, distributed);
+        runStreamBenchmark("ALO", events, settings, sink);
 
-        if (distributed) {
+        if (settings.distributed()) {
             resetAllNodesOperationalState();
         } else {
             resetOperationalTablesOnly();
         }
-        runStreamBenchmark("EOS", events, windowSizeSec, distributed);
+        runStreamBenchmark("EOS", events, settings, sink);
 
         Map<String, Object> payload = latestBenchmarkPayload();
-        payload.put("dataset", mutableMap(
-                "eventCount", events.size(),
-                "uniquePayments", events.stream().map(e -> e.idempotencyKey).collect(Collectors.toSet()).size(),
-                "duplicateEvents", events.size() - events.stream().map(e -> e.idempotencyKey).collect(Collectors.toSet()).size(),
-                "duplicateRate", duplicateRate,
-                "windowSizeSec", windowSizeSec,
-                "seed", seed));
+        payload.put("dataset", dataset);
+        sendIfPresent(sink, "complete", payload);
         return payload;
     }
 
-    private void runStreamBenchmark(String mode, List<StreamEvent> events, int windowSizeSec, boolean distributed) {
+    private void runStreamBenchmark(String mode, List<StreamEvent> events, BenchmarkSettings settings, BenchmarkSink sink) {
         String runId = UUID.randomUUID().toString();
         long start = System.nanoTime();
         List<Double> latencies = new ArrayList<>();
@@ -364,7 +398,7 @@ public class PaymentStreamService implements PaymentOperations {
             }
             eventLags.add(Math.max(0, event.processingTimeMs - event.eventTimeMs));
 
-            long wStart = windowKey(event.eventTimeMs, windowSizeSec);
+            long wStart = windowKey(event.eventTimeMs, settings.windowSizeSec());
             WindowAccumulator acc = windowState.computeIfAbsent(wStart, ignored -> new WindowAccumulator());
             acc.totalEvents++;
             acc.uniqueKeys.add(event.idempotencyKey);
@@ -374,9 +408,9 @@ public class PaymentStreamService implements PaymentOperations {
 
             PaymentCommand payment = new PaymentCommand(event.senderAccount, event.receiverAccount, event.amount.doubleValue(),
                     event.nodeId, mode, event.idempotencyKey, event.retryCount, event.eventTimeMs);
-            
+
             Map<String, Object> result;
-            if (distributed) {
+            if (settings.distributed()) {
                 if (currentNodeConfigured() && configuredNodeId.equals(event.nodeId)) {
                     result = submitPayment(payment);
                 } else {
@@ -385,7 +419,7 @@ public class PaymentStreamService implements PaymentOperations {
             } else {
                 result = submitPayment(payment);
             }
-            
+
             double latency = ((Number) result.getOrDefault("elapsedMs", 0)).doubleValue();
             latencies.add(latency);
             acc.latencies.add(latency);
@@ -409,12 +443,33 @@ public class PaymentStreamService implements PaymentOperations {
                 errors++;
                 acc.errors++;
             }
+
+            sendIfPresent(sink, "progress", benchmarkProgressPayload(
+                    runId,
+                    mode,
+                    i + 1,
+                    events.size(),
+                    status,
+                    late,
+                    watermark,
+                    processedSuccess,
+                    duplicatesBlocked,
+                    errors,
+                    outOfOrder,
+                    lateEvents,
+                    backpressureDelayed,
+                    wStart,
+                    settings.windowSizeSec(),
+                    acc));
+            if (sink != null && settings.streamDelayMs() > 0) {
+                sleepQuietly(settings.streamDelayMs());
+            }
         }
 
         double durationMs = Math.max(elapsedMs(start), 1.0);
         int uniquePayments = events.stream().map(e -> e.idempotencyKey).collect(Collectors.toSet()).size();
-        long walEntries = distributed ? walEntriesObserved : wal.count();
-        long walCommitted = distributed ? walEntriesObserved : wal.countByStatus("COMMITTED");
+        long walEntries = settings.distributed() ? walEntriesObserved : wal.count();
+        long walCommitted = settings.distributed() ? walEntriesObserved : wal.countByStatus("COMMITTED");
         BenchmarkRun run = new BenchmarkRun();
         run.runId = runId;
         run.mode = mode;
@@ -440,18 +495,19 @@ public class PaymentStreamService implements PaymentOperations {
         run.walEntries = (int) walEntries;
         run.walCommitted = (int) walCommitted;
         run.walOverheadPct = round((walEntries / Math.max(processedSuccess, 1.0)) * 100.0);
-        run.windowSizeSec = windowSizeSec;
+        run.windowSizeSec = settings.windowSizeSec();
         run.watermarkMs = maxEventTime - allowedLatenessMs;
         run.createdAt = Instant.now();
         runs.save(run);
 
+        List<StreamWindow> modeWindows = new ArrayList<>();
         for (Map.Entry<Long, WindowAccumulator> entry : windowState.entrySet()) {
             WindowAccumulator acc = entry.getValue();
             StreamWindow window = new StreamWindow();
             window.runId = runId;
             window.mode = mode;
             window.windowStartMs = entry.getKey();
-            window.windowEndMs = entry.getKey() + windowSizeSec * 1000L;
+            window.windowEndMs = entry.getKey() + settings.windowSizeSec() * 1000L;
             window.totalEvents = acc.totalEvents;
             window.uniquePayments = acc.uniqueKeys.size();
             window.processedSuccess = acc.processedSuccess;
@@ -460,19 +516,21 @@ public class PaymentStreamService implements PaymentOperations {
             window.lateEvents = acc.lateEvents;
             window.avgLatencyMs = round(avg(acc.latencies));
             window.avgEventLagMs = round(events.stream()
-                    .filter(e -> windowKey(e.eventTimeMs, windowSizeSec) == entry.getKey())
+                    .filter(e -> windowKey(e.eventTimeMs, settings.windowSizeSec()) == entry.getKey())
                     .mapToLong(e -> Math.max(0, e.processingTimeMs - e.eventTimeMs))
                     .average().orElse(0));
             window.p50LatencyMs = round(percentile(acc.latencies, 50));
             window.p95LatencyMs = round(percentile(acc.latencies, 95));
             window.p99LatencyMs = round(percentile(acc.latencies, 99));
-            window.tps = round(acc.totalEvents / (double) windowSizeSec);
+            window.tps = round(acc.totalEvents / (double) settings.windowSizeSec());
             window.walEntries = acc.walEntries;
             window.createdAt = Instant.now();
             windows.save(window);
+            modeWindows.add(window);
         }
 
         saveCheckpoint(mode, maxEventTime, maxEventTime - allowedLatenessMs, windowState.size());
+        sendIfPresent(sink, "run", mutableMap("mode", mode, "run", run, "windows", modeWindows));
     }
 
     private void saveCheckpoint(String mode, long lastEventTimeMs, long watermarkMs, int windowsPersisted) {
@@ -772,12 +830,130 @@ public class PaymentStreamService implements PaymentOperations {
                 "backpressureDelayed", run.backpressureDelayed);
     }
 
+    private static Map<String, Object> benchmarkDataset(List<StreamEvent> events, BenchmarkSettings settings) {
+        int uniquePayments = events.stream().map(e -> e.idempotencyKey).collect(Collectors.toSet()).size();
+        return mutableMap(
+                "eventCount", events.size(),
+                "uniquePayments", uniquePayments,
+                "duplicateEvents", events.size() - uniquePayments,
+                "duplicateRate", settings.duplicateRate(),
+                "windowSizeSec", settings.windowSizeSec(),
+                "seed", settings.seed());
+    }
+
+    private static Map<String, Object> benchmarkProgressPayload(
+            String runId,
+            String mode,
+            int eventIndex,
+            int totalEvents,
+            String status,
+            boolean late,
+            long watermark,
+            int processedSuccess,
+            int duplicatesBlocked,
+            int errors,
+            int outOfOrder,
+            int lateEvents,
+            int backpressureDelayed,
+            long windowStartMs,
+            int windowSizeSec,
+            WindowAccumulator acc) {
+        return mutableMap(
+                "mode", mode,
+                "eventIndex", eventIndex,
+                "totalEvents", totalEvents,
+                "status", status,
+                "late", late,
+                "watermarkMs", watermark,
+                "processedSuccess", processedSuccess,
+                "duplicatesBlocked", duplicatesBlocked,
+                "errors", errors,
+                "outOfOrderCount", outOfOrder,
+                "lateEvents", lateEvents,
+                "backpressureDelayed", backpressureDelayed,
+                "window", windowPayload(runId, mode, windowStartMs, windowSizeSec, acc));
+    }
+
+    private static Map<String, Object> windowPayload(String runId, String mode, long windowStartMs, int windowSizeSec, WindowAccumulator acc) {
+        return mutableMap(
+                "runId", runId,
+                "mode", mode,
+                "windowStartMs", windowStartMs,
+                "windowEndMs", windowStartMs + windowSizeSec * 1000L,
+                "totalEvents", acc.totalEvents,
+                "uniquePayments", acc.uniqueKeys.size(),
+                "processedSuccess", acc.processedSuccess,
+                "duplicatesBlocked", acc.duplicatesBlocked,
+                "errors", acc.errors,
+                "lateEvents", acc.lateEvents,
+                "avgLatencyMs", round(avg(acc.latencies)),
+                "p50LatencyMs", round(percentile(acc.latencies, 50)),
+                "p95LatencyMs", round(percentile(acc.latencies, 95)),
+                "p99LatencyMs", round(percentile(acc.latencies, 99)),
+                "tps", round(acc.totalEvents / (double) windowSizeSec),
+                "walEntries", acc.walEntries);
+    }
+
+    private static void sendIfPresent(BenchmarkSink sink, String eventName, Map<String, Object> payload) {
+        if (sink != null) {
+            sink.send(eventName, payload);
+        }
+    }
+
+    private static void sendToEmitter(SseEmitter emitter, String eventName, Object payload) {
+        try {
+            emitter.send(SseEmitter.event().name(eventName).data(payload));
+        } catch (Exception e) {
+            throw new IllegalStateException("Benchmark stream client disconnected", e);
+        }
+    }
+
+    private static void sleepQuietly(int millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Benchmark stream interrupted", e);
+        }
+    }
+
+    private static int clamp(Integer value, int fallback, int min, int max) {
+        return Math.max(min, Math.min(value == null ? fallback : value, max));
+    }
+
+    private static double clamp(Double value, double fallback, double min, double max) {
+        return Math.max(min, Math.min(value == null ? fallback : value, max));
+    }
+
     private static Map<String, Object> mutableMap(Object... values) {
         Map<String, Object> map = new LinkedHashMap<>();
         for (int i = 0; i < values.length; i += 2) {
             map.put(String.valueOf(values[i]), values[i + 1]);
         }
         return map;
+    }
+
+    @FunctionalInterface
+    private interface BenchmarkSink {
+        void send(String eventName, Map<String, Object> payload);
+    }
+
+    private record BenchmarkSettings(
+            int eventCount,
+            double duplicateRate,
+            int windowSizeSec,
+            int seed,
+            boolean distributed,
+            int streamDelayMs) {
+        static BenchmarkSettings from(BenchmarkCommand command) {
+            return new BenchmarkSettings(
+                    clamp(command.eventCount(), DEFAULT_EVENT_COUNT, 10, 1000),
+                    clamp(command.duplicateRate(), DEFAULT_DUPLICATE_RATE, 0, 0.8),
+                    clamp(command.windowSizeSec(), DEFAULT_WINDOW_SIZE_SEC, 2, 60),
+                    command.seed() == null ? DEFAULT_SEED : command.seed(),
+                    Boolean.TRUE.equals(command.distributed()),
+                    clamp(command.streamDelayMs(), DEFAULT_STREAM_DELAY_MS, 0, 100));
+        }
     }
 
     private static class WindowAccumulator {

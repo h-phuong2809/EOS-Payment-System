@@ -22,6 +22,13 @@ export const api = {
   simulateRetries: (payload) => request('/simulate-retries', { method: 'POST', body: JSON.stringify(payload) }),
   benchmarkLatest: () => request('/benchmark/latest'),
   benchmarkCompare: (payload) => request('/benchmark/compare', { method: 'POST', body: JSON.stringify(payload) }),
+  benchmarkStreamUrl: (payload) => {
+    const params = new URLSearchParams()
+    Object.entries(payload).forEach(([key, value]) => {
+      if (value !== undefined && value !== null) params.set(key, value)
+    })
+    return `${API_BASE}/benchmark/stream?${params.toString()}`
+  },
   dedup: () => request('/deduplication-table'),
   wal: () => request('/wal-log'),
   transactions: () => request('/transactions'),

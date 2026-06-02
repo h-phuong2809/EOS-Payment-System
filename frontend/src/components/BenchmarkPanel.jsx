@@ -13,7 +13,7 @@ import {
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler)
 
-export default function BenchmarkPanel({ payload, onRun, onReplayWal }) {
+export default function BenchmarkPanel({ payload, isRunning, progress, onRun, onReplayWal }) {
   const runs = payload?.runs || []
   const windows = payload?.windows || []
   const eos = runs.find((r) => r.mode === 'EOS')
@@ -21,9 +21,11 @@ export default function BenchmarkPanel({ payload, onRun, onReplayWal }) {
   const labels = [...new Set(windows.map((w) => String(w.windowStartMs)))].sort((a, b) => Number(a) - Number(b))
   const eosDuplicateCharges = duplicateCharges(eos)
   const aloDuplicateCharges = duplicateCharges(alo)
+  const progressPct = progress?.totalEvents ? Math.round((Number(progress.eventIndex || 0) / Number(progress.totalEvents)) * 100) : 0
 
   async function runBenchmark(event) {
     event.preventDefault()
+    if (isRunning) return
     const form = new FormData(event.currentTarget)
     await onRun({
       eventCount: Number(form.get('eventCount')),
@@ -37,14 +39,31 @@ export default function BenchmarkPanel({ payload, onRun, onReplayWal }) {
     <div className="big-panel">
       <div className="panel-header">
         <h2><span className="panel-icon">BM</span> Live Stream Benchmark</h2>
-        <button className="icon-btn" onClick={onReplayWal}>Replay WAL</button>
+        <div className="panel-actions">
+          {isRunning && <span className="live-pill">LIVE {progress?.mode || 'RUN'}</span>}
+          <button className="icon-btn" onClick={onReplayWal} disabled={isRunning}>Replay WAL</button>
+        </div>
       </div>
       <form className="benchmark-controls" onSubmit={runBenchmark}>
-        <Field name="eventCount" label="Payment Events" defaultValue="160" />
-        <Field name="duplicateRate" label="Duplicate Rate (%)" defaultValue="30" />
-        <Field name="windowSizeSec" label="Window (sec)" defaultValue="10" />
-        <button className="btn btn-primary">Run Compare</button>
+        <Field name="eventCount" label="Payment Events" defaultValue="160" disabled={isRunning} />
+        <Field name="duplicateRate" label="Duplicate Rate (%)" defaultValue="30" disabled={isRunning} />
+        <Field name="windowSizeSec" label="Window (sec)" defaultValue="10" disabled={isRunning} />
+        <button className="btn btn-primary" disabled={isRunning}>{isRunning ? 'Streaming...' : 'Run Live'}</button>
       </form>
+
+      {isRunning && (
+        <div className="live-strip">
+          <div>
+            <span>{progress?.mode || 'ALO'} stream</span>
+            <strong>{Number(progress?.eventIndex || 0)} / {Number(progress?.totalEvents || 0)} events</strong>
+          </div>
+          <div className="live-meter"><span style={{ width: `${Math.min(100, progressPct)}%` }} /></div>
+          <div className="live-status">
+            <span>{progress?.status || 'STARTING'}</span>
+            <span>{progressPct}%</span>
+          </div>
+        </div>
+      )}
 
       <div className="compare-grid">
         <Metric label="EOS TPS" value={eos?.tps || 0} />
@@ -88,11 +107,11 @@ export default function BenchmarkPanel({ payload, onRun, onReplayWal }) {
   )
 }
 
-function Field({ name, label, defaultValue }) {
+function Field({ name, label, defaultValue, disabled }) {
   return (
     <label className="form-group">
       <span>{label}</span>
-      <input name={name} type="number" defaultValue={defaultValue} />
+      <input name={name} type="number" defaultValue={defaultValue} disabled={disabled} />
     </label>
   )
 }
@@ -136,6 +155,7 @@ function ChartBox({ title, labels, windows, field }) {
       legend: { labels: { color: '#647084', boxWidth: 10 } },
       title: { display: true, text: title, color: '#17202c', font: { size: 13, weight: '700' } },
     },
+    animation: { duration: 240 },
     scales: {
       x: { ticks: { color: '#647084', maxRotation: 0 }, grid: { color: 'rgba(100,112,132,.16)' } },
       y: { beginAtZero: true, ticks: { color: '#647084' }, grid: { color: 'rgba(100,112,132,.16)' } },
