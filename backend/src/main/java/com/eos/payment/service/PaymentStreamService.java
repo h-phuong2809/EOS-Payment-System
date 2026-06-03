@@ -87,13 +87,8 @@ public class PaymentStreamService implements PaymentOperations {
     @Transactional
     public void seed() {
         walSequence.set(wal.findAll().stream().mapToLong(w -> w.sequenceNumber).max().orElse(0));
-        if (accounts.count() == 0) {
-            accounts.saveAll(List.of(
-                    new Account("ACC001", "Nguyen Van An", new BigDecimal("5000000")),
-                    new Account("ACC002", "Tran Thi Bich", new BigDecimal("3000000")),
-                    new Account("ACC003", "Le Hoang Cuong", new BigDecimal("8000000")),
-                    new Account("ACC004", "Pham Thi Dung", new BigDecimal("2000000")),
-                    new Account("ACC005", "Hoang Van Enh", new BigDecimal("6500000"))));
+        if (accounts.count() < 100) {
+            accounts.saveAll(defaultAccounts());
         }
         if (nodes.count() == 0) {
             nodes.saveAll(nodeDefinitions());
@@ -110,12 +105,7 @@ public class PaymentStreamService implements PaymentOperations {
         globalDedup.deleteAll();
         transactions.deleteAll();
         requests.deleteAll();
-        accounts.saveAll(List.of(
-                new Account("ACC001", "Nguyen Van An", new BigDecimal("5000000")),
-                new Account("ACC002", "Tran Thi Bich", new BigDecimal("3000000")),
-                new Account("ACC003", "Le Hoang Cuong", new BigDecimal("8000000")),
-                new Account("ACC004", "Pham Thi Dung", new BigDecimal("2000000")),
-                new Account("ACC005", "Hoang Van Enh", new BigDecimal("6500000"))));
+        accounts.saveAll(defaultAccounts());
         nodes.saveAll(nodeDefinitions());
         walSequence.set(0);
     }
@@ -664,7 +654,7 @@ public class PaymentStreamService implements PaymentOperations {
         Random rng = new Random(seed);
         List<StreamEvent> originals = new ArrayList<>();
         List<StreamEvent> events = new ArrayList<>();
-        List<String> accountIds = List.of("ACC001", "ACC002", "ACC003", "ACC004", "ACC005");
+        List<String> accountIds = defaultAccountIds();
         long baseMs = System.currentTimeMillis();
         for (int i = 0; i < eventCount; i++) {
             StreamEvent event;
@@ -701,12 +691,7 @@ public class PaymentStreamService implements PaymentOperations {
         globalDedup.deleteAll();
         transactions.deleteAll();
         requests.deleteAll();
-        accounts.saveAll(List.of(
-                new Account("ACC001", "Nguyen Van An", new BigDecimal("5000000")),
-                new Account("ACC002", "Tran Thi Bich", new BigDecimal("3000000")),
-                new Account("ACC003", "Le Hoang Cuong", new BigDecimal("8000000")),
-                new Account("ACC004", "Pham Thi Dung", new BigDecimal("2000000")),
-                new Account("ACC005", "Hoang Van Enh", new BigDecimal("6500000"))));
+        accounts.saveAll(defaultAccounts());
         nodes.saveAll(nodeDefinitions());
         walSequence.set(0);
     }
@@ -785,6 +770,26 @@ public class PaymentStreamService implements PaymentOperations {
                 new ProcessingNode("NODE_A", "Primary Node A", "ACTIVE"),
                 new ProcessingNode("NODE_B", "Secondary Node B", "ACTIVE"),
                 new ProcessingNode("NODE_C", "Backup Node C", "ACTIVE"));
+    }
+
+    private static List<Account> defaultAccounts() {
+        List<Account> seedAccounts = new ArrayList<>(100);
+        seedAccounts.add(new Account("ACC001", "Nguyen Van An", new BigDecimal("5000000")));
+        seedAccounts.add(new Account("ACC002", "Tran Thi Bich", new BigDecimal("3000000")));
+        seedAccounts.add(new Account("ACC003", "Le Hoang Cuong", new BigDecimal("8000000")));
+        seedAccounts.add(new Account("ACC004", "Pham Thi Dung", new BigDecimal("2000000")));
+        seedAccounts.add(new Account("ACC005", "Hoang Van Enh", new BigDecimal("6500000")));
+        for (int i = 6; i <= 100; i++) {
+            seedAccounts.add(new Account(
+                    String.format("ACC%03d", i),
+                    "Khach Hang " + String.format("%03d", i),
+                    BigDecimal.valueOf(1_000_000L + i * 100_000L)));
+        }
+        return seedAccounts;
+    }
+
+    private static List<String> defaultAccountIds() {
+        return defaultAccounts().stream().map(account -> account.accountId).toList();
     }
 
     private static String defaultText(String value, String fallback) {
